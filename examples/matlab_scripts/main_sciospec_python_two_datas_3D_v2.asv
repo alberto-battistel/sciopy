@@ -1,0 +1,276 @@
+clear; close all; clc;
+
+%% 1.Initialization
+% Start-up EIDORS
+init_eidors()
+
+%Upload files from the ScioPy
+%%Import refernce.mat
+imported_data_1 = load('C:\Users\Acer\Documents\GitHub\sciopy\examples\experiment_ref.mat'); 
+%%Import data with anomaly.mat
+imported_data_2 = load('C:\Users\Acer\Documents\GitHub\sciopy\examples\experiment_anom.mat');
+
+%% 2.Data processing
+Raw_data_Ref = permute(imported_data_1.data, [2 3 1]);
+amplitude = imported_data_1.amplitude;
+n_frames = imported_data_1.n_frames;
+numOfChannels = double(imported_data_1.numOfChannels); %electrodes
+NSkip = double(imported_data_1.NSkip); %inj_skip
+measure_mode = 1;  % single-ended mode
+Raw_data_Anom = permute(imported_data_2.data, [2 3 1]);
+numOfRefFrames = n_frames;
+numOfImagingFrames = n_frames;
+
+%Devide data into  and data frames
+VoltageRef  = Raw_data_Ref;
+VoltageAnoMoving = Raw_data_Anom;
+
+%% 3.Convert Sciospec data to EIT data
+rmv_indx = func_rmv_skip(numOfChannels, NSkip);
+VeitRef = nan(numOfChannels*(numOfChannels-3), numOfRefFrames);
+for k=1:numOfRefFrames
+    if measure_mode == 1 % single-ended mode
+        VeitRef(:,k) = func_ConvertSciospecToEIT(VoltageRef(:,:,k).',numOfChannels,NSkip,false);
+    elseif measure_mode == 2 % differntial mode
+        tmp = VoltageRef(:,:,k);
+        tmp(rmv_indx) = [];
+        VeitRef(:,k) = tmp(:);
+    end
+    
+end
+
+VeitAnoMoving = nan(numOfChannels*(numOfChannels-3), numOfImagingFrames);
+for k=1:numOfImagingFrames
+    if measure_mode == 1 % single-ended mode
+        VeitAnoMoving(:,k) = func_ConvertSciospecToEIT(VoltageAnoMoving(:,:,k).',numOfChannels,NSkip,false);
+    elseif measure_mode == 2 % differntial mode
+        tmp = VoltageAnoMoving(:,:,k);
+        tmp(rmv_indx) = [];
+        VeitAnoMoving(:,k) = tmp(:);
+    end
+end
+
+v_all = real(VeitAnoMoving);
+v_ref = real(VeitRef(:,1)); % Set first frame as the reference frame for time-difference imaging
+figure(1);clf;plot(abs(v_all),'.-'); title('U-shape Plot'); grid on; ylabel('abs(voltage) [V]'); set(gca,'yscale','log') % display U-shape plot for quality checking
+
+%% 4. 3D model setup
+
+% 4.1 Create 3D model
+
+imdl3D = mk_common_model('b3cr', [16,2]);
+fmdl = imdl3D.fwd_model;
+nelec = length(fmdl.electrode);
+if nelec ~= 32
+    error('Expected 32 electrodes, but model has %d electrodes.', nelec);
+end
+
+% 4.2 Compute original electrode centers
+
+elec_centers_old = zeros(nelec, 3);
+for i = 1:nelec
+    nodes_i = fmdl.electrode(i).nodes;
+    coords_i = fmdl.nodes(nodes_i, :);
+    elec_centers_old(i,:) = mean(coords_i, 1);
+end
+x = elec_centers_old(:,1);
+y = elec_centers_old(:,2);
+z = elec_centers_old(:,3);
+angles_deg = mod(rad2deg(atan2(y, x)), 360);
+
+% 4.3 Split electrodes into upper and lower rings
+
+z_median = median(z);
+lower_old_idx = find(z < z_median);
+upper_old_idx = find(z > z_median);
+if length(lower_old_idx) ~= 16 || length(upper_old_idx) ~= 16
+    error('Could not split electrodes into upper/lower rings of 16 electrodes.');
+end
+
+%% ------------------------------------------------------------
+% 4. Sort electrodes inside each ring by angle
+%% ------------------------------------------------------------
+% direction = +1 means increasing angle counter-clockwise
+% direction = -1 means clockwise
+%
+% start_angle_deg controls where the first electrode in each ring starts.
+% 0 deg   = +x direction
+% 90 deg  = +y direction
+% 180 deg = -x direction
+% 270 deg = -y direction
+
+direction = -1;
+start_angle_deg = 0;
+
+upper_angles = angles_deg(upper_old_idx);
+lower_angles = angles_deg(lower_old_idx);
+
+if direction == +1
+    [~, upper_order] = sort(mod(upper_angles - start_angle_deg, 360), 'ascend');
+    [~, lower_order] = sort(mod(lower_angles - start_angle_deg, 360), 'ascend');
+else
+    [~, upper_order] = sort(mod(start_angle_deg - upper_angles, 360), 'ascend');
+    [~, lower_order] = sort(mod(start_angle_deg - lower_angles, 360), 'ascend');
+end
+
+upper_sorted_old_idx = upper_old_idx(upper_order);
+lower_sorted_old_idx = lower_old_idx(lower_order);
+
+%% ------------------------------------------------------------
+% 5. Define your required new electrode numbers
+%% ------------------------------------------------------------
+
+upper_new_numbers = [1 2 5 6 9 10 13 14 17 18 21 22 25 26 29 30];
+
+lower_new_numbers = [32 3 4 7 8 11 12 15 16 19 20 23 24 27 28 31];
+
+if length(upper_new_numbers) ~= 16 || length(lower_new_numbers) ~= 16
+    error('Upper and lower numbering vectors must both have length 16.');
+end
+
+if ~isequal(sort([upper_new_numbers lower_new_numbers]), 1:32)
+    error('The new numbering must contain every number from 1 to 32 exactly once.');
+end
+
+%% ------------------------------------------------------------
+% 6. Build remap vector
+%% ------------------------------------------------------------
+% Meaning:
+% remap(new_electrode_number) = old_electrode_number
+%
+% Example:
+% remap(1) = old electrode physically located at the first upper position
+% remap(3) = old electrode physically located at the first lower position
+
+remap = zeros(1, nelec);
+
+for k = 1:16
+    remap(upper_new_numbers(k)) = upper_sorted_old_idx(k);
+    remap(lower_new_numbers(k)) = lower_sorted_old_idx(k);
+end
+
+if any(remap == 0)
+    error('Remap vector contains zeros. Something went wrong.');
+end
+
+if ~isequal(sort(remap), 1:nelec)
+    error('Invalid remap vector. It must contain all old electrodes exactly once.');
+end
+
+fprintf('\nRemap vector:\n');
+disp(remap);
+
+%% ------------------------------------------------------------
+% 7. Apply remapping to the model
+%% ------------------------------------------------------------
+
+fmdl.electrode = fmdl.electrode(remap);
+
+%% ------------------------------------------------------------
+% 8. Apply continuous current injection pattern after remapping
+%% ------------------------------------------------------------
+
+numOfChannels = 32;
+NSkip = 0;
+amplitude = 0.01;   % amplitude*1000 = 10
+
+[fmdl.stimulation, fmdl.meas_select] = ...
+    mk_stim_patterns(numOfChannels, 1, ...
+                     [1+NSkip, 0], ...
+                     [0, 1+NSkip], ...
+                     {'no_meas_current'}, ...
+                     amplitude*1000);
+
+imdl3D.fwd_model = fmdl;
+
+%% ------------------------------------------------------------
+% 9. Compute new electrode centers after remapping
+%% ------------------------------------------------------------
+
+elec_centers_new = zeros(nelec, 3);
+
+for i = 1:nelec
+    nodes_i = fmdl.electrode(i).nodes;
+    coords_i = fmdl.nodes(nodes_i, :);
+    elec_centers_new(i,:) = mean(coords_i, 1);
+end
+
+angles_new_deg = mod(rad2deg(atan2(elec_centers_new(:,2), ...
+                                    elec_centers_new(:,1))), 360);
+
+
+%% 3. Difference solver
+imdl3D.solve = @inv_solve_diff_GN_one_step;
+imdl3D.reconst_type = 'difference';
+imdl3D.RtR_prior = @prior_noser;      % как в tutorial
+imdl3D.hyperparameter.value = 0.17;   % стартовое значение из tutorial
+
+%% 4. Data
+vh = v_ref;                     % 928x1
+vi = v_all;                           % 928x1
+
+%% 5. Reconstruction
+img = inv_solve(imdl3D, vh, vi);
+
+%% 6. Visualization
+
+figure(2);
+show_fem(img);
+title('3D EIDORS model with custom electrode renumbering');
+hold on;
+
+scale_xy = 1.15;
+
+for i = 1:nelec
+    c = elec_centers_new(i,:);
+    label_pos = [scale_xy*c(1), scale_xy*c(2), c(3)];
+
+    if ismember(i, upper_new_numbers)
+        label_color = 'b'; % upper ring
+    else
+        label_color = 'b'; % lower ring
+    end
+
+    text(label_pos(1), label_pos(2), label_pos(3), sprintf('%d', i), ...
+        'Color', label_color, ...
+        'FontSize', 12, ...
+        'FontWeight', 'bold', ...
+        'HorizontalAlignment', 'center');
+end
+
+hold off;
+axis equal;
+view(3);
+
+img.calc_colours.ref_level = 0;
+img.calc_colours.greylev = -0.05;
+
+
+figure(3);
+show_3d_slices(img, [0.5], [0.5], [0.5]);
+eidors_colourbar(img);
+% Image reconstruction
+img3D = inv_solve_diff_GN_one_step(imdl3D, v_ref, v_all);
+
+img3D.calc_colours.ref_level=0;
+img3D.type='image';
+img3D.show_slices.img_cols=0;
+img3D.calc_colours.ref_level=0;
+
+% figure(6);clf;show_slices(img3D);
+% title('Difference Imaging')
+
+
+
+% %% Image reconstruction (Movie)
+% img3D = inv_solve_diff_GN_one_step(imdl3D, v_ref, v_all);
+% elem_data_all = img3D.elem_data;
+% 
+% figure(4);clf;
+% for i = 1:size(v_all,2)
+%     img3D.elem_data = elem_data_all(:,i);
+%     figure(4);
+%     show_slices(img3D);
+%     title({'Difference Imaging' ; [num2str(i) 'th frame']})
+%     pause(0.01)
+% end
