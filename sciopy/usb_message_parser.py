@@ -18,6 +18,7 @@ import struct
 from .sciopy_dataclasses import EitMeasurementSetup, EITFrame
 from .com_util import bytesarray_to_float, byteintarray_to_float, two_byte_to_int
 from datetime import datetime
+import numpy as np
 
 # -------------------------------------------------------------------------------------------------------------------- #
 # -------------------------------------------------------------------------------------------------------------------- #
@@ -53,7 +54,7 @@ def byte_parser():
         fMesstype = data  # Save the Byte
 
         data = yield []  # 2 Byte = Length of Data within message
-        iCurrLen = int.from_bytes(data)
+        iCurrLen = int.from_bytes(data, byteorder="big")
         piCurrMess.extend(data)
 
         data = yield []  # Next iCurrLen Bytes = Actual Data Bytes
@@ -117,8 +118,17 @@ class MessageParser:
         self.setup = setup
         if setup != None:
             self.iMaxChannelGroups = setup.n_el // 16
-            self.iNumExcitationSettings = setup.n_el  # todo should be independently set
-            self.iNumFreqSettings = 1  # todo
+
+            if isinstance(setup.inj_skip, (list, tuple, np.ndarray)):
+                n_inj_skip = len(setup.inj_skip)
+            else:
+                n_inj_skip = 1
+            
+            self.iNumExcitationSettings = (
+                setup.n_el * n_inj_skip
+            )
+            
+            self.iNumFreqSettings = 1
             self.iLenDataperFrame = (
                 self.iMaxChannelGroups
                 * 16
@@ -260,12 +270,15 @@ class MessageParser:
 
     # ---------------------------------------------------------------------------------------------------------------- #
     def read_usb_till_timeout(
+            
+        
         self,
-        bSaveData: bool = False,
-        bDeleteDataFrame: bool = False,
-        sSavePath: str = "C/",
-        bStartReset: bool = True,
-    ):
+        bSaveData=False,
+        bDeleteDataFrame=False,
+        sSavePath="C:/",
+        bStartReset=True,
+        max_empty_reads=100,
+        ):
         """
         Reads out the USB connection until the connections times out, so for messages received + timeout. Data bytes are parsed,
         sorted into full messages and then handled according to their Command Tag. Status or requested information is
@@ -283,18 +296,27 @@ class MessageParser:
         timeout_count = 0
         while True:
             buffer = self.device_read()
+        
             if buffer:
                 message = self.Parser.send(buffer)
+        
                 if len(message) > 0:
                     self.interpret_message(
-                        message, bSaveData, bDeleteDataFrame, sSavePath
+                        message,
+                        bSaveData,
+                        bDeleteDataFrame,
+                        sSavePath
                     )
                     iMessageCount += 1
+        
                 timeout_count = 0
                 continue
-            timeout_count += 1
-            if timeout_count >= 1:
-                # Break if we haven't received any data
+        
+            else:
+                time.sleep(0.01)
+                timeout_count += 1
+        
+            if timeout_count >= max_empty_reads:
                 break
 
         print(f"{iMessageCount} message(s) received.")
