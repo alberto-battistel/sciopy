@@ -1,5 +1,4 @@
 """Module for interfacing with the Sciospec EIT devices via serial communication"""
-import time 
 
 try:
     import serial
@@ -30,7 +29,7 @@ msg_dict = {
 }
 
 from .sciopy_dataclasses import EitMeasurementSetup
-from .usb_message_parser import (
+from sciopydev.sciopy.usb_message_parser import (
     MessageParser,
     make_eitframes_hex,
     get_data_as_matrix,
@@ -275,9 +274,7 @@ class EIT_16_32_64_128:
         self.cMessageParser.bPrintMessages = self.print_msg
         self.send_message(command)
         self.cMessageParser.read_usb_till_timeout(
-            bSaveData=False,
-            bDeleteDataFrame=True,
-            max_empty_reads=10,
+            bSaveData=False, bDeleteDataFrame=True
         )
 
     # --- sciospec device commands
@@ -439,8 +436,9 @@ class EIT_16_32_64_128:
         elif setup.gain == 1_000:
             self.write_command_string(bytearray([0xB0, 0x03, 0x09, 0x01, 0x03, 0xB0]))
 
-        # Single-ended measurement mode
-        self.write_command_string(bytearray([0xB0,0x03,0x08,0x01,0x01,0xB0]))
+        # Single ended mode as standard setup, if else configured, skip patterns are possible:
+        self.update_measurement_mode(setup.mea_mode, boundary=setup.mea_mode_boundary)
+        # self.write_command_string(bytearray([0xB0, 0x03, 0x08, 0x01, 0x01, 0xB0]))
 
         # Excitation switch type:
         self.write_command_string(bytearray([0xB0, 0x02, 0x0C, 0x01, 0xB0]))
@@ -467,84 +465,13 @@ class EIT_16_32_64_128:
         )
 
         # Set injection config
-        assert setup.n_el == self.n_el, (
-            "Number of electrodes in setup configuration must match "
-            "Eit_16_32_64_128() initialization."
+        assert setup.n_el == self.n_el, print(
+            "Number of electrodes in setup configuration must match Eit_16_32_64_128() initialization."
         )
-
         el_inj = np.arange(1, setup.n_el + 1)
-
-        # inj_skip may be either a single integer or a list/tuple/array
-        if isinstance(setup.inj_skip, (list, tuple, np.ndarray)):
-            inj_skip_values = list(setup.inj_skip)
-        else:
-            inj_skip_values = [setup.inj_skip]
-
-        if len(inj_skip_values) == 0:
-            raise ValueError("inj_skip list cannot be empty.")
-
-        injection_command_count = 0
-
-        for inj_skip in inj_skip_values:
-            # Make sure every inj_skip value is an integer
-            if not isinstance(inj_skip, (int, np.integer)):
-                raise TypeError(
-                    "inj_skip must contain integers. "
-                    f"Received: {inj_skip!r}"
-                )
-
-            inj_skip = int(inj_skip)
-
-            # Check range
-            if inj_skip < 0 or inj_skip >= setup.n_el - 1:
-                raise ValueError(
-                    f"Invalid inj_skip={inj_skip}. "
-                    f"For {setup.n_el} electrodes it must be between "
-                    f"0 and {setup.n_el - 2}."
-                )
-
-            el_gnd = np.roll(
-                el_inj,
-                -(inj_skip + 1)
-            )
-
-            for v_el, g_el in zip(el_inj, el_gnd):
-                v_el = int(v_el)
-                g_el = int(g_el)
-                injection_command_count += 1
-
-                print(
-                    f"[{injection_command_count:03d}] "
-                    f"skip={inj_skip}, "
-                    f"source={v_el}, "
-                    f"sink={g_el}"
-                )
-
-                self.write_command_string(
-                    bytearray([
-                        0xB0,
-                        0x03,
-                        0x06,
-                        v_el,
-                        g_el,
-                        0xB0
-                    ])
-                )
-
-        expected_command_count = setup.n_el * len(inj_skip_values)
-
-        if injection_command_count != expected_command_count:
-            raise RuntimeError(
-                "Unexpected number of injection commands: "
-                f"sent {injection_command_count}, "
-                f"expected {expected_command_count}."
-            )
-
-        print(
-            "Injection configuration complete: "
-            f"{injection_command_count} patterns sent "
-            f"for inj_skip={inj_skip_values}."
-        )
+        el_gnd = np.roll(el_inj, -(setup.inj_skip + 1))
+        for v_el, g_el in zip(el_inj, el_gnd):
+            self.write_command_string(bytearray([0xB0, 0x03, 0x06, v_el, g_el, 0xB0]))
 
         self.print_msg = True
         # Set output configuration - enable all
